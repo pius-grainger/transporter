@@ -27,6 +27,12 @@ var (
 // CollectionFilter is just a typed map of strings of map[string]interface{}
 type CollectionFilter map[string]interface{}
 
+type MDocElem bson.DocElem
+
+//func (m MDocElem) String() string {
+//	return fmt.Sprintf("%+v", m.Value)
+//}
+
 // Reader implements the behavior defined by client.Reader for interfacing with MongoDB.
 type Reader struct {
 	tail              bool
@@ -182,12 +188,32 @@ func (r *Reader) iterate(lastID interface{}, s *mgo.Session, c string) <-chan me
 
 func (r *Reader) catQuery(c string, lastID interface{}, mgoSession *mgo.Session) *mgo.Query {
 	query := bson.M{}
-	if f, ok := r.collectionFilters[c]; ok {
-		query = bson.M(f)
+
+	//if f, ok := r.collectionFilters[c]; ok {
+	//	query = bson.M(f)
+	//}
+	//  map[createdAt:map[$gte:2019-04-02 20:54:11.353 +0000 UTC]]
+	//  map[createdAt:map[$gte:2017-04-02 20:54:11.353 +0000 UTC]]
+	// filter: { createdAt: { $gte: new Date(1554238451353) } }
+	// filter: { createdAt: { name: "createdAt", value: { $gte: { name: "$gte", value: new Date(1491166451353) } } } }
+	query, err := parseMap(r.collectionFilters[c], false)
+	if err != nil {
+		panic(err)
 	}
+
+	// t, err := time.Parse(time.RFC3339, "2019-04-02T20:54:11.353Z")
+	// if err != nil {
+	// 	panic(err)
+	// }
+	//log.Infoln("queryString created: ", bson.M{"createdAt": bson.M{"$gte": t}})
+	//query = bson.M{"createdAt": bson.M{"$gte": t}}
+	//query = bson.M{"$or": []bson.M{bson.M{"createdAt": bson.M{"$gte": t}}, bson.M{"createdAt": bson.M{"$gte": t}}}}
+	//log.Infoln("queryString created: ", bson.M{"$or": []bson.M{bson.M{"createdAt": bson.M{"$gte": t}}, bson.M{"createdAt": bson.M{"$gte": t}}}})
 	if lastID != nil {
 		query["_id"] = bson.M{"$gt": lastID}
 	}
+
+	log.Infoln("queryString : ", query)
 	return mgoSession.DB("").C(c).Find(query).Sort("_id")
 }
 
@@ -345,4 +371,82 @@ func (o *oplogDoc) validOp(ns string) bool {
 
 func timeAsMongoTimestamp(t time.Time) bson.MongoTimestamp {
 	return bson.MongoTimestamp(t.Unix() << 32)
+}
+
+func parseTime(val string) (time.Time, error) {
+	t, err := time.Parse("2006-01-02T15:04:05.999Z", val)
+	return t, err
+}
+
+func parseInterface(key string, val interface{}, timeFlag bool) (MDocElem, interface{}, error) {
+	result := bson.DocElem{Name: key}
+	//xType := reflect.TypeOf(val)
+	//xValue := reflect.ValueOf(val)
+	//fmt.Println(xType, xValue)
+	switch val.(type) {
+	case map[string]interface{}:
+
+		if (key == "createdAt") || (key == "updatedAt") || (key == "deletedAt") {
+			timeFlag = true
+		} else {
+			timeFlag = false
+		}
+		value, err := parseMap(val.(map[string]interface{}), timeFlag)
+		if err != nil {
+			//error while parsing the map
+			return MDocElem(result), "", err
+		}
+		result.Value = value
+	case []interface{}:
+		value, err := parseArray(val.([]interface{}))
+		if err != nil {
+			//error while parsing the array
+			return MDocElem(result), "", err
+		}
+		result.Value = value
+	case string:
+		if !timeFlag {
+			break
+		}
+		value, err := parseTime(val.(string))
+		if err != nil {
+			//error while parsing the time
+			return MDocElem(result), "", err
+		}
+		result.Value = value
+	default:
+		result.Value = val
+	}
+	return MDocElem(result), result.Value, nil
+}
+
+func parseMap(aMap map[string]interface{}, timeFlag bool) (bson.M, error) {
+
+	result := bson.M{}
+
+	for key, val := range aMap {
+		//fmt.Println("key 0", key)
+		//fmt.Println("Value 0 ", val)
+		value, realValue, err := parseInterface(key, val, timeFlag)
+		if err != nil {
+			return nil, err
+		}
+		//fmt.Println("key 1", key)
+		log.Infoln("Value from parseMap : ", value, realValue)
+		result[key] = realValue
+	}
+	return result, nil
+}
+
+func parseArray(anArray []interface{}) ([]interface{}, error) {
+	result := []interface{}{}
+	for _, val := range anArray {
+		value, realValue, err := parseInterface("", val, false)
+		if err != nil {
+			return nil, err
+		}
+		log.Infoln("Value from parseArray : ", value, realValue)
+		result = append(result, realValue)
+	}
+	return result, nil
 }
